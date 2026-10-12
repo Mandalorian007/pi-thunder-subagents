@@ -1,0 +1,40 @@
+{
+  "name": "pi-thunder-subagents",
+  "version": "0.1.0",
+  "description": "Subagents for Pi: hand a task to another Pi with its own context, model and saved session, limited to one level deep by default.",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts",
+    "./lib": "./lib.ts"
+  },
+  "license": "MIT",
+  "author": "Mandalorian007",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mandalorian007/pi-thunder-subagents.git"
+  },
+  "homepage": "https://github.com/Mandalorian007/pi-thunder-subagents#readme",
+  "bugs": "https://github.com/Mandalorian007/pi-thunder-subagents/issues",
+  "keywords": ["pi-package", "pi", "pi-coding-agent", "subagents", "delegation", "agents"],
+  "files": ["index.ts", "lib.ts", "agents", "README.md", "LICENSE"],
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "test": "node --test 'tests/*.test.ts'",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@types/node": "22.18.0",
+    "typebox": "1.3.7",
+    "typescript": "5.9.3"
+  },
+  "engines": {
+    "node": ">=22.19"
+  }
+}
