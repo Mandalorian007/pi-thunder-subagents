@@ -132,6 +132,60 @@ export function sessionFile(dir: string, id: string): string | undefined {
   return name ? join(dir, name) : undefined;
 }
 
+// What a saved subagent session came to, read from its file: for listing a
+// session's subagents, above all after the parent was killed mid-call.
+//   finished     its last message is a reply that ended normally
+//   failed       its last message is an error or an abort
+//   interrupted  anything else: it stopped mid-turn, so it can be resumed
+export type Status = "finished" | "failed" | "interrupted";
+
+export type Saved = { id: string; task: string; model?: string; turns: number; cost: number; status: Status; updated?: string; reply: string };
+
+type Entry = {
+  type?: string;
+  id?: string;
+  timestamp?: string;
+  provider?: string;
+  modelId?: string;
+  message?: { role?: string; content?: Part[] | string; stopReason?: string; usage?: Usage };
+};
+
+const textOf = (content: Part[] | string | undefined) =>
+  typeof content === "string" ? content : (content ?? []).filter((p) => p.type === "text" && p.text).map((p) => p.text!.trim()).join("\n\n");
+
+export function readSaved(jsonl: string): Saved {
+  const entries: Entry[] = [];
+  for (const line of jsonl.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      entries.push(JSON.parse(line));
+    } catch {
+      // A line cut off when the process was killed.
+    }
+  }
+  const header = entries.find((e) => e.type === "session");
+  const model = entries.filter((e) => e.type === "model_change").at(-1);
+  const messages = entries.filter((e) => e.type === "message" && e.message);
+  const replies = messages.filter((e) => e.message!.role === "assistant");
+  const last = messages.at(-1)?.message;
+  const status: Status =
+    last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")
+      ? "failed"
+      : last?.role === "assistant" && last.stopReason !== "toolUse"
+        ? "finished"
+        : "interrupted";
+  return {
+    id: header?.id ?? "",
+    task: textOf(messages.find((e) => e.message!.role === "user")?.message!.content),
+    ...(model?.provider && model.modelId ? { model: `${model.provider}/${model.modelId}` } : {}),
+    turns: replies.length,
+    cost: replies.reduce((sum, e) => sum + (e.message!.usage?.cost?.total ?? 0), 0),
+    status,
+    updated: entries.at(-1)?.timestamp,
+    reply: textOf(replies.at(-1)?.message!.content),
+  };
+}
+
 // ---------------------------------------------------------------- the child
 
 export type ChildPlan = {

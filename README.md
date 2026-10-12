@@ -12,7 +12,7 @@ pi install git:github.com/Mandalorian007/pi-thunder-subagents        # every pi 
 pi -e git:github.com/Mandalorian007/pi-thunder-subagents             # try it for one run
 ```
 
-Pin a version with `@v0.1.0`. Install it for the user, not just for one run with `-e`. The depth limit holds because every Pi process loads the extension, including each subagent and any Pi a subagent starts.
+Pin a version with `@v0.2.0`. Install it for the user, not just for one run with `-e`. The depth limit holds because every Pi process loads the extension, including each subagent and any Pi a subagent starts.
 
 ## The tool
 
@@ -22,6 +22,7 @@ Pin a version with `@v0.1.0`. Install it for the user, not just for one run with
 | Resume | `{ resume: "scout-k3j9x2", task }` | The reply from the same subagent, with its context intact |
 | Parallel | `{ tasks: [{ agent?, task, model?, thinking? }, …] }` | Up to 8 tasks, 4 at a time. Each reply is capped at 50 KB |
 | Chain | `{ chain: [{ …, task: "… {previous} …" }, …] }` | The last step's reply. `{previous}` in a task is replaced by the reply of the step before |
+| List | `{ list: true }` | This session's subagents: ID, status, model, turns, cost, last activity and task |
 
 The parent gets only each subagent's final reply, followed by a footer line:
 
@@ -52,6 +53,16 @@ Every subagent is a saved Pi session, next to the session of the parent that sta
 ```
 
 Each one holds the subagent's whole transcript, so you can open it with `pi --session <path>` or export it with `pi --export <path>`. `pi -c` and `pi -r` do not list them; they look only at the project's own sessions. The tool's `resume` continues a subagent in the same file, so it keeps everything it read before.
+
+### After a crash
+
+If the parent is killed while a subagent runs, the subagent stops too. Its session is saved up to its last step. When the parent is resumed (`pi -c`), Pi fills in the cut-off call as "No result provided", so the parent no longer has the subagent's ID. The tool's guidelines tell the model what to do then:
+1. Call `{ list: true }`. Each subagent is shown as `finished`, `failed`, `running` or `interrupted`, read from the end of its session file.
+2. Resume the interrupted one with a task such as "You were interrupted. Carry on from where you stopped and finish the original task."
+
+It continues in the same session file, with everything it had already read.
+
+This was tested by killing a parent while its scout was partway through reading three files. Told only "Carry on.", the resumed parent listed its subagents, resumed the interrupted scout, and got all three summaries. You can also resume either session by hand: the parent with `pi -c`, and the subagent with `pi --session <path>`.
 
 Each result also carries its subagents' token usage and cost, so they count in the parent session's totals. The result's `details` hold a short record of each subagent (ID, model, turns, cost and session file) rather than its transcript.
 

@@ -3,7 +3,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { capText, childArgs, depthOf, isSessionId, loadRoles, maxDepthOf, newRun, newSessionId, parseRole, readLine, resolveModel, roleOfSession, sessionFile } from "../lib.ts";
+import { capText, childArgs, depthOf, isSessionId, loadRoles, maxDepthOf, newRun, newSessionId, parseRole, readLine, readSaved, resolveModel, roleOfSession, sessionFile } from "../lib.ts";
 
 test("depth is 0 at the top and the limit defaults to 1", () => {
   assert.equal(depthOf({}), 0);
@@ -107,4 +107,34 @@ test("long replies are cut and say so", () => {
   const cut = capText("é".repeat(2000), 1024);
   assert.match(cut, /\[cut at 1 KB/);
   assert.ok(Buffer.byteLength(cut.split("\n\n[cut")[0], "utf8") <= 1024);
+});
+
+test("a saved session says whether it finished, failed or was cut off", () => {
+  const usage = (total: number) => ({ cost: { total } });
+  const head = [
+    { type: "session", version: 3, id: "scout-arorwe", timestamp: "2026-10-12T14:16:28.152Z" },
+    { type: "model_change", provider: "openrouter", modelId: "anthropic/claude-haiku-5.5", timestamp: "2026-10-12T14:16:28.186Z" },
+    { type: "message", timestamp: "2026-10-12T14:16:29.000Z", message: { role: "user", content: [{ type: "text", text: "Read the docs." }] } },
+    { type: "message", timestamp: "2026-10-12T14:16:30.000Z", message: { role: "assistant", content: [{ type: "toolCall", name: "read" }], stopReason: "toolUse", usage: usage(0.001) } },
+    { type: "message", timestamp: "2026-10-12T14:16:31.000Z", message: { role: "toolResult", content: [{ type: "text", text: "..." }] } },
+  ];
+  const jsonl = (entries: object[], tail = "") => entries.map((e) => JSON.stringify(e)).join("\n") + "\n" + tail;
+
+  const cut = readSaved(jsonl(head, '{"type":"custom","da'));
+  assert.equal(cut.id, "scout-arorwe");
+  assert.equal(cut.status, "interrupted");
+  assert.equal(cut.task, "Read the docs.");
+  assert.equal(cut.model, "openrouter/anthropic/claude-haiku-5.5");
+  assert.equal(cut.turns, 1);
+  assert.equal(cut.updated, "2026-10-12T14:16:31.000Z");
+
+  const done = readSaved(jsonl([...head, { type: "message", message: { role: "assistant", content: [{ type: "text", text: "Summary." }], stopReason: "stop", usage: usage(0.002) } }]));
+  assert.equal(done.status, "finished");
+  assert.equal(done.reply, "Summary.");
+  assert.equal(Number(done.cost.toFixed(3)), 0.003);
+
+  const broke = readSaved(jsonl([...head, { type: "message", message: { role: "assistant", content: [], stopReason: "error" } }]));
+  assert.equal(broke.status, "failed");
+
+  assert.equal(readSaved(jsonl(head.slice(0, 3))).status, "interrupted");
 });

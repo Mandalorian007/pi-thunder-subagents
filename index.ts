@@ -10,13 +10,16 @@
 //   Depth     PI_SUBAGENT_MAX_DEPTH levels below the top (default 1). A
 //             process at the limit has no subagent tool, and a Pi started
 //             from inside one (say, by its bash tool) refuses to run.
+//   Recovery  `list` shows this session's subagents and which were cut off
+//             (say, when the parent was killed mid-call), so one can be
+//             resumed from where it stopped.
 //   Cost      each result carries its subagents' usage, so the session's
 //             totals include them.
 //
 // The parts that need no session are in ./lib.ts.
 
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,6 +41,7 @@ import {
   newRun,
   newSessionId,
   readLine,
+  readSaved,
   resolveModel,
   roleOfSession,
   sessionFile,
@@ -132,6 +136,11 @@ async function mapLimited<T, R>(items: T[], limit: number, fn: (item: T, index: 
 
 const footer = (c: Child) => `[subagent ${c.id} · ${c.model} · ${c.turns} turn${c.turns === 1 ? "" : "s"} · ${dollars(c.cost)}]`;
 
+// Subagents running in this process, so `list` can tell them from ones cut off.
+const running = new Set<string>();
+
+const subagentDir = (ctx: ExtensionContext) => join(ctx.sessionManager.getSessionDir(), ctx.sessionManager.getSessionId(), "subagents");
+
 const brief = (c: Child) => ({ ...c, task: c.task.slice(0, 300), text: c.text.slice(0, 2_000) });
 
 export default function subagents(pi: ExtensionAPI) {
@@ -161,7 +170,7 @@ export default function subagents(pi: ExtensionAPI) {
     if (!wanted) throw new Error("No model: name one with `model`, or choose one for this session.");
     const available = ctx.modelRegistry.getAvailable().map((m) => ({ provider: m.provider, id: m.id }));
     const resolved = resolveModel(wanted, available, ctx.model?.provider);
-    const sessionDir = join(ctx.sessionManager.getSessionDir(), ctx.sessionManager.getSessionId(), "subagents");
+    const sessionDir = subagentDir(ctx);
     if (resume && !sessionFile(sessionDir, resume)) throw new Error(`No subagent session "${resume}" belongs to this session.`);
     const name = role?.name ?? roleName ?? "general";
     return {
@@ -179,7 +188,8 @@ export default function subagents(pi: ExtensionAPI) {
   const start = async (p: ChildPlan, ctx: ExtensionContext, signal: AbortSignal | undefined, progress: (c: Child) => void): Promise<Child> => {
     const child: Child = { id: p.sessionId, role: roleOfSession(p.sessionId), model: p.model, task: p.task, exitCode: -1, turns: 0, cost: 0, text: "", usage: emptyUsage() };
     const fill = (run: Run) => Object.assign(child, { turns: run.turns, cost: run.usage.cost.total, usage: run.usage, stopReason: run.stopReason, error: run.error, lastTool: run.lastTool, text: run.text, model: run.model ?? p.model });
-    const { run, exitCode, stderr } = await runChild(p, ctx.cwd, depth + 1, signal, (r) => progress(fill(r)));
+    running.add(p.sessionId);
+    const { run, exitCode, stderr } = await runChild(p, ctx.cwd, depth + 1, signal, (r) => progress(fill(r))).finally(() => running.delete(p.sessionId));
     fill(run);
     child.exitCode = exitCode;
     child.session = sessionFile(p.sessionDir, p.sessionId);
@@ -197,13 +207,34 @@ export default function subagents(pi: ExtensionAPI) {
     thinking: Type.Optional(Type.Union(THINKING.map((t) => Type.Literal(t)), { description: "Thinking level. Default: the role's, else yours." })),
   };
 
+  const list = (ctx: ExtensionContext) => {
+    const dir = subagentDir(ctx);
+    const files = existsSync(dir) ? readdirSync(dir).filter((n) => n.endsWith(".jsonl")).sort() : [];
+    const saved = files.map((n) => {
+      const s = readSaved(readFileSync(join(dir, n), "utf8"));
+      return { ...s, status: running.has(s.id) ? ("running" as const) : s.status, file: join(dir, n) };
+    });
+    if (!saved.length) return { content: [{ type: "text" as const, text: "This session has no subagents." }], details: { mode: "list", subagents: [] } };
+    const when = (t?: string) => (t ? new Date(t).toLocaleString() : "unknown");
+    const lines = saved.map(
+      (s) =>
+        `- ${s.id} · ${s.status} · ${s.model ?? "unknown model"} · ${s.turns} turn${s.turns === 1 ? "" : "s"} · ${dollars(s.cost)} · last active ${when(s.updated)}\n  task: ${s.task.replace(/\s+/g, " ").slice(0, 300)}`,
+    );
+    const interrupted = saved.filter((s) => s.status === "interrupted");
+    const hint = interrupted.length ? `\n\nTo carry on with an interrupted one, call subagent with resume set to its ID and a task such as "You were interrupted. Carry on from where you stopped and finish the original task."` : "";
+    return {
+      content: [{ type: "text" as const, text: `This session's subagents (${saved.length}):\n${lines.join("\n")}${hint}` }],
+      details: { mode: "list", subagents: saved.map(({ reply: _reply, ...s }) => s) },
+    };
+  };
+
   pi.registerTool({
     name: "subagent",
     label: "Subagent",
     description: [
       "Hand a task to a subagent: a separate Pi with its own context, whose final reply is all that comes back to you.",
       "One task: agent + task. Several independent tasks at once: tasks (up to 8, 4 at a time). Steps that build on each other: chain, where {previous} in a step's task is replaced by the step before's reply.",
-      "Every subagent's session is saved; pass its ID as resume (with a new task) to continue it with its context intact.",
+      "Every subagent's session is saved; pass its ID as resume (with a new task) to continue it with its context intact. list: true shows this session's subagents and which were interrupted.",
       `Roles: ${roleList || "none"}.`,
     ].join(" "),
     promptSnippet: "Delegate a self-contained task to a subagent with its own context and model",
@@ -212,6 +243,7 @@ export default function subagents(pi: ExtensionAPI) {
       "A subagent has not seen this conversation. Put everything it needs in the task.",
       "Run independent subagents together with tasks; use chain only when a step needs the previous step's reply.",
       "Choose a cheaper model for simple searches and summaries, and a stronger one for hard changes. To follow up with a subagent, pass its ID as resume rather than starting again.",
+      "If an earlier subagent call has no result (the session was interrupted while it ran), call subagent with list: true, and resume the interrupted subagent with a task such as \"You were interrupted. Carry on from where you stopped and finish the original task.\" rather than starting it again.",
       "Subagents cannot start subagents of their own.",
     ],
     parameters: Type.Object({
@@ -220,11 +252,13 @@ export default function subagents(pi: ExtensionAPI) {
       resume: Type.Optional(Type.String({ description: "A subagent ID from an earlier result, such as scout-k3j9x2, to continue that subagent with task." })),
       tasks: Type.Optional(Type.Array(Type.Object(SpecSchema), { minItems: 1, maxItems: MAX_PARALLEL, description: "Independent tasks to run at once." })),
       chain: Type.Optional(Type.Array(Type.Object(SpecSchema), { minItems: 1, description: "Steps in order; {previous} in a task is the previous step's reply." })),
+      list: Type.Optional(Type.Boolean({ description: "List this session's subagents: ID, status (finished, interrupted, failed, running), model, cost and task." })),
     }),
 
     async execute(_id, params, signal, onUpdate, ctx) {
-      const modes = [params.task !== undefined, params.tasks !== undefined, params.chain !== undefined].filter(Boolean).length;
-      if (modes !== 1) throw new Error("Give exactly one of task, tasks or chain.");
+      const modes = [params.task !== undefined, params.tasks !== undefined, params.chain !== undefined, params.list === true].filter(Boolean).length;
+      if (modes !== 1) throw new Error("Give exactly one of task, tasks, chain or list.");
+      if (params.list) return list(ctx);
       if (params.resume && !isSessionId(params.resume)) throw new Error(`"${params.resume}" is not a subagent ID.`);
       if (params.resume && !params.task) throw new Error("resume needs a task: what the subagent should do next.");
       const update = (text: string, children: Child[]) => onUpdate?.({ content: [{ type: "text", text }], details: { children: children.map(brief) } });

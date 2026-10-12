@@ -1,6 +1,6 @@
 {
   "name": "pi-thunder-subagents",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Subagents for Pi: hand a task to another Pi with its own context, model and saved session, limited to one level deep by default.",
   "type": "module",
   "exports": {
